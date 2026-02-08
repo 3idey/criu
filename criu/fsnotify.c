@@ -364,7 +364,7 @@ free:
 static int pre_dump_one_inotify(int pid, int lfd)
 {
 	InotifyFileEntry ie = INOTIFY_FILE_ENTRY__INIT;
-	int i;
+	int i, ret = -1;
 
 	if (parse_fdinfo_pid(pid, lfd, FD_TYPES__INOTIFY, &ie)) {
 		pr_err("Failed to parse fdinfo for inotify (pid %d lfd %d)\n", pid, lfd);
@@ -377,13 +377,18 @@ static int pre_dump_one_inotify(int pid, int lfd)
 		if (irmap_queue_cache(we->s_dev, we->i_ino, we->f_handle)) {
 			pr_err("Failed to queue irmap cache for inotify wd %#x (dev %#x ino %#" PRIx64 ")\n",
 			       we->wd, we->s_dev, we->i_ino);
-			return -1;
+			goto err;
 		}
 
 		xfree(we);
 	}
 
-	return 0;
+	ret = 0;
+err:
+	for (; i < ie.n_wd; i++)
+		xfree(ie.wd[i]);
+	xfree(ie.wd);
+	return ret;
 }
 
 const struct fdtype_ops inotify_dump_ops = {
