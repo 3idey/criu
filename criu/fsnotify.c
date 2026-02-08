@@ -476,7 +476,7 @@ free:
 static int pre_dump_one_fanotify(int pid, int lfd)
 {
 	FanotifyFileEntry fe = FANOTIFY_FILE_ENTRY__INIT;
-	int i;
+	int i, ret = -1;
 
 	if (parse_fdinfo_pid(pid, lfd, FD_TYPES__FANOTIFY, &fe)) {
 		pr_err("Failed to parse fdinfo for fanotify (pid %d lfd %d)\n", pid, lfd);
@@ -489,13 +489,18 @@ static int pre_dump_one_fanotify(int pid, int lfd)
 		if (me->type == MARK_TYPE__INODE && irmap_queue_cache(me->s_dev, me->ie->i_ino, me->ie->f_handle)) {
 			pr_err("Failed to queue irmap cache for fanotify mark (dev %#x ino %#" PRIx64 " mask %#x)\n",
 			       me->s_dev, me->ie->i_ino, me->mask);
-			return -1;
+			goto err;
 		}
 
 		xfree(me);
 	}
 
-	return 0;
+	ret = 0;
+err:
+	for (; i < fe.n_mark; i++)
+		xfree(fe.mark[i]);
+	xfree(fe.mark);
+	return ret;
 }
 
 const struct fdtype_ops fanotify_dump_ops = {
