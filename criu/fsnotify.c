@@ -529,12 +529,12 @@ static char *get_mark_path(const char *who, struct file_remap *remap, FhEntry *f
 	} else if (f_handle->path) {
 		int mntns_root;
 		char *fpath = ".";
-		uint32_t mnt_id = f_handle->has_mnt_id ? f_handle->mnt_id : -1;
+		int mnt_id = f_handle->has_mnt_id ? (int)f_handle->mnt_id : -1;
 
 		/* irmap cache is collected in the root namespaces. */
 		mntns_root = mntns_get_root_by_mnt_id(mnt_id);
 		if (mntns_root < 0) {
-			pr_err("Failed to get mount namespace root for path hint (mnt_id %#x path %s)\n",
+			pr_err("Failed to get mount namespace root for path hint (mnt_id %d path %s)\n",
 			       mnt_id, f_handle->path);
 			goto err;
 		}
