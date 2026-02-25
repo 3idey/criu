@@ -244,6 +244,17 @@ int dump_sk_queue(int sock_fd, int sock_id)
 			ret = -E2BIG;
 			goto err_set_sock;
 		}
+		if (msg.msg_flags & MSG_CTRUNC) {
+			/*
+			 * Control data truncated. This means the cmsg
+			 * buffer was too small and SCM data (such as
+			 * passed file descriptors) has been silently
+			 * discarded by the kernel.
+			 */
+			pr_err("sys_recvmsg failed: control data truncated\n");
+			ret = -E2BIG;
+			goto err_set_sock;
+		}
 
 		if (dump_packet_cmsg(&msg, &pe))
 			goto err_set_sock;
