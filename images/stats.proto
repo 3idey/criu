@@ -32,6 +32,8 @@ message restore_stats_entry {
 	required uint32			restore_time		= 4;
 
 	optional uint64			pages_restored		= 5;
+
+	optional uint32			resume_time		= 6;
 }
 
 message stats_entry {

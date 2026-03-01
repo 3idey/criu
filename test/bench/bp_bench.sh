@@ -148,8 +148,8 @@ do_restore()
 
 	# Extract restore time from output
 	local rtime
-	rtime=$(echo "$output" | grep "Restore time:" | \
-		sed 's/.*Restore time: \([0-9]*\) us.*/\1/')
+	rtime=$(echo "$output" | grep "Resume time:" | \
+		sed 's/.*Resume time: \([0-9]*\) us.*/\1/')
 
 	if [[ -z "$rtime" ]]; then
 		echo "0"

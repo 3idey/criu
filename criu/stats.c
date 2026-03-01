@@ -147,6 +147,8 @@ static void display_stats(int what, StatsEntry *stats)
 			       stats->restore->pages_restored);
 		pr_msg("Restore time: %d us\n", stats->restore->restore_time);
 		pr_msg("Forking time: %d us\n", stats->restore->forking_time);
+		if (stats->restore->has_resume_time)
+			pr_msg("Resume time: %d us\n", stats->restore->resume_time);
 	} else
 		return;
 }
@@ -197,6 +199,8 @@ void write_stats(int what)
 
 		encode_time(TIME_FORK, &rs_entry.forking_time);
 		encode_time(TIME_RESTORE, &rs_entry.restore_time);
+		rs_entry.has_resume_time = true;
+		encode_time(TIME_RESUME, &rs_entry.resume_time);
 
 		name = "restore";
 	} else

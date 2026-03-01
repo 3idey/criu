@@ -40,8 +40,8 @@ int main(int argc, char **argv)
 	nr_threads = atoi(argv[1]);
 	pid_file = argv[2];
 
-	if (nr_threads < 0 || nr_threads > 10000) {
-		fprintf(stderr, "num_threads must be 0..10000\n");
+	if (nr_threads < 0 || nr_threads > 100000) {
+		fprintf(stderr, "num_threads must be 0..100000\n");
 		return 1;
 	}
 

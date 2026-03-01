@@ -269,16 +269,19 @@ static int crtools_prepare_shared(void)
  */
 
 static struct collect_image_info *cinfos[] = {
-	&file_locks_cinfo,  &pipe_data_cinfo, &fifo_data_cinfo, &sk_queues_cinfo,
+	&file_locks_cinfo,
+	&pipe_data_cinfo,
+	&fifo_data_cinfo,
+	&sk_queues_cinfo,
 #ifdef CONFIG_HAS_LIBBPF
 	&bpfmap_data_cinfo,
 #endif
 };
 
 static struct collect_image_info *cinfos_files[] = {
-	&unix_sk_cinfo,	      &fifo_cinfo,     &pipe_cinfo,    &nsfile_cinfo,	    &packet_sk_cinfo,
-	&netlink_sk_cinfo,    &eventfd_cinfo,  &epoll_cinfo,   &epoll_tfd_cinfo,    &signalfd_cinfo,
-	&tunfile_cinfo,	      &timerfd_cinfo,  &inotify_cinfo, &inotify_mark_cinfo, &fanotify_cinfo,
+	&unix_sk_cinfo, &fifo_cinfo, &pipe_cinfo, &nsfile_cinfo, &packet_sk_cinfo,
+	&netlink_sk_cinfo, &eventfd_cinfo, &epoll_cinfo, &epoll_tfd_cinfo, &signalfd_cinfo,
+	&tunfile_cinfo, &timerfd_cinfo, &inotify_cinfo, &inotify_mark_cinfo, &fanotify_cinfo,
 	&fanotify_mark_cinfo, &ext_file_cinfo, &memfd_cinfo, &pidfd_cinfo
 };
 
@@ -1713,7 +1716,10 @@ static int restore_task_with_children(void *_arg)
 }
 
 int __attribute((weak)) arch_ptrace_restore(int pid, struct pstree_item *item);
-int arch_ptrace_restore(int pid, struct pstree_item *item) { return 0; }
+int arch_ptrace_restore(int pid, struct pstree_item *item)
+{
+	return 0;
+}
 
 static int attach_to_tasks(bool root_seized)
 {
@@ -2221,6 +2227,7 @@ skip_ns_bouncing:
 		goto out_kill_network_unlocked;
 
 	timing_stop(TIME_RESTORE);
+	timing_start(TIME_RESUME);
 
 	if (catch_tasks(root_seized)) {
 		pr_err("Can't catch all tasks\n");
@@ -2237,6 +2244,8 @@ skip_ns_bouncing:
 		pr_err("Can't stop all tasks on rt_sigreturn\n");
 		goto out_kill_network_unlocked;
 	}
+
+	timing_stop(TIME_RESUME);
 
 	finalize_restore();
 
@@ -3138,7 +3147,9 @@ static void *restorer_munmap_addr(CoreEntry *core, void *restorer_blob)
 }
 
 void arch_rsti_init(struct pstree_item *p) __attribute__((weak));
-void arch_rsti_init(struct pstree_item *p) {}
+void arch_rsti_init(struct pstree_item *p)
+{
+}
 
 static int sigreturn_restore(pid_t pid, struct task_restore_args *task_args, unsigned long alen, CoreEntry *core)
 {
