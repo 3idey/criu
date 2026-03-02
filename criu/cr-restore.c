@@ -3435,6 +3435,11 @@ static int sigreturn_restore(pid_t pid, struct task_restore_args *task_args, uns
 			goto err;
 		}
 
+		if (tcore->thread_core->has_timerslack_ns) {
+			thread_args[i].has_timerslack_ns = true;
+			thread_args[i].timerslack_ns = tcore->thread_core->timerslack_ns;
+		}
+
 		ret = prep_sched_info(&thread_args[i].sp, tcore->thread_core);
 		if (ret)
 			goto err;

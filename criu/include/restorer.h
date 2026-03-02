@@ -114,6 +114,8 @@ struct thread_restore_args {
 	unsigned int siginfo_n;
 
 	int pdeath_sig;
+	bool has_timerslack_ns;
+	unsigned long timerslack_ns;
 
 	struct thread_creds_args *creds_args;
 

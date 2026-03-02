@@ -66,6 +66,10 @@
 #define PR_SET_PDEATHSIG 1
 #endif
 
+#ifndef PR_SET_TIMERSLACK
+#define PR_SET_TIMERSLACK 29
+#endif
+
 #ifndef PR_SET_CHILD_SUBREAPER
 #define PR_SET_CHILD_SUBREAPER 36
 #endif
@@ -406,6 +410,22 @@ static inline int restore_pdeath_sig(struct thread_restore_args *ta)
 	ret = sys_prctl(PR_SET_PDEATHSIG, ta->pdeath_sig, 0, 0, 0);
 	if (ret) {
 		pr_err("Unable to set PR_SET_PDEATHSIG(%d): %d\n", ta->pdeath_sig, ret);
+		return -1;
+	}
+
+	return 0;
+}
+
+static inline int restore_timerslack(struct thread_restore_args *ta)
+{
+	int ret;
+
+	if (!ta->has_timerslack_ns)
+		return 0;
+
+	ret = sys_prctl(PR_SET_TIMERSLACK, ta->timerslack_ns, 0, 0, 0);
+	if (ret) {
+		pr_err("Unable to set PR_SET_TIMERSLACK(%lu): %d\n", ta->timerslack_ns, ret);
 		return -1;
 	}
 
@@ -816,6 +836,7 @@ __visible long __export_restore_thread(struct thread_restore_args *args)
 	ret = restore_creds(args->creds_args, args->ta->proc_fd, args->ta->lsm_type, args->ta->uid);
 	ret = ret || restore_dumpable_flag(&args->ta->mm);
 	ret = ret || restore_pdeath_sig(args);
+	ret = ret || restore_timerslack(args);
 	if (ret)
 		BUG();
 
@@ -2290,6 +2311,7 @@ __visible long __export_restore_task(struct task_restore_args *args)
 	ret = restore_creds(args->t->creds_args, args->proc_fd, args->lsm_type, args->uid);
 	ret = ret || restore_dumpable_flag(&args->mm);
 	ret = ret || restore_pdeath_sig(args->t);
+	ret = ret || restore_timerslack(args->t);
 	ret = ret || restore_child_subreaper(args->child_subreaper);
 
 	futex_set_and_wake(&thread_inprogress, args->nr_threads);
