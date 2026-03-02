@@ -1590,7 +1590,7 @@ static int restore_devices(struct kfd_ioctl_criu_args *args, CriuKfd *e)
 
 		drm_fd = node_get_drm_render_device(tp_node);
 		if (drm_fd < 0) {
-			pr_perror("Can't open drm render fd %d\n", tp_node->drm_render_minor);
+			pr_perror("Can't open drm render fd %d", tp_node->drm_render_minor);
 			goto exit;
 		} else {
 			pr_info("passing drm render fd = %d to driver\n", drm_fd);
