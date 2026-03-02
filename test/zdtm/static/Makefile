@@ -26,6 +26,7 @@ TST_NOFILE	:=				\
 		timers				\
 		timers01			\
 		timerfd				\
+		timerslack_ns			\
 		unbound_sock			\
 		sched_prio00			\
 		sched_policy00			\
@@ -619,6 +620,7 @@ sigpending:		LDLIBS += -pthread
 sigaltstack:		LDLIBS += -pthread
 seccomp_filter_tsync:	LDLIBS += -pthread
 seccomp_filter_threads:	LDLIBS += -pthread
+timerslack_ns:		LDLIBS += -pthread
 shm:			CFLAGS += -DNEW_IPC_NS
 msgque:			CFLAGS += -DNEW_IPC_NS
 sem:			CFLAGS += -DNEW_IPC_NS
