@@ -21,7 +21,7 @@ WORKER_SRC="${SCRIPT_DIR}/bp_bench_worker.c"
 WORKER_BIN="${SCRIPT_DIR}/bp_bench_worker"
 WORK_DIR="/tmp/bp_bench_$$"
 ITERATIONS="${1:-5}"
-THREAD_COUNTS="1 10 50 100 500"
+THREAD_COUNTS="1 10 50 100 500 1000 10000"
 
 # Colors for output
 RED='\033[0;31m'
