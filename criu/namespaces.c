@@ -1581,19 +1581,49 @@ int stop_usernsd(void)
 	return ret;
 }
 
-int prepare_userns(struct pstree_item *item)
+static int read_user_ns_img(void)
 {
+	struct ns_id *ns;
 	struct cr_img *img;
-	UsernsEntry *e;
 	int ret;
 
-	img = open_image(CR_FD_USERNS, O_RSTR, item->ids->user_ns_id);
+	if (!(root_ns_mask & CLONE_NEWUSER))
+		return 0;
+
+	ns = lookup_ns_by_id(root_item->ids->user_ns_id, &user_ns_desc);
+	if (!ns) {
+		pr_err("Can not find user ns\n");
+		return -1;
+	}
+
+	img = open_image(CR_FD_USERNS, O_RSTR, root_item->ids->user_ns_id);
 	if (!img)
 		return -1;
-	ret = pb_read_one(img, &e, PB_USERNS);
+	ret = pb_read_one(img, &ns->user.e, PB_USERNS);
 	close_image(img);
-	if (ret < 0)
+	if (ret < 0) {
+		pr_err("Can not read userns object\n");
 		return -1;
+	}
+
+	return 0;
+}
+
+int prepare_userns(struct pstree_item *item)
+{
+	struct ns_id *ns;
+	UsernsEntry *e;
+
+	ns = lookup_ns_by_id(item->ids->user_ns_id, &user_ns_desc);
+	if (!ns) {
+		pr_err("Can not find user ns\n");
+		return -1;
+	}
+	e = ns->user.e;
+	if (!e) {
+		pr_err("userns image was not pre-read\n");
+		return -1;
+	}
 
 	if (write_id_map(item->pid->real, e->uid_map, e->n_uid_map, "uid_map"))
 		return -1;
@@ -1606,24 +1636,27 @@ int prepare_userns(struct pstree_item *item)
 
 int restore_userns_binfmt_misc(struct pstree_item *item)
 {
-	struct cr_img *img;
+	struct ns_id *ns;
 	UsernsEntry *e;
-	int ret = 0;
+	int ret;
 
-	img = open_image(CR_FD_USERNS, O_RSTR, item->ids->user_ns_id);
-	if (!img)
+	ns = lookup_ns_by_id(item->ids->user_ns_id, &user_ns_desc);
+	if (!ns) {
+		pr_err("Can not find user ns\n");
 		return -1;
-	ret = pb_read_one(img, &e, PB_USERNS);
-	close_image(img);
-	if (ret < 0)
+	}
+	e = ns->user.e;
+	if (!e) {
+		pr_err("userns image was not pre-read\n");
 		return -1;
+	}
 
-	if (binfmt_misc_restore_sandboxed(item->pid->real, e->binfmt_misc, e->n_binfmt_misc))
-		ret = -1;
+	ret = binfmt_misc_restore_sandboxed(item->pid->real, e->binfmt_misc, e->n_binfmt_misc);
 
-	userns_entry__free_unpacked(e, NULL);
+	userns_entry__free_unpacked(ns->user.e, NULL);
+	ns->user.e = NULL;
 
-	return ret < 0 ? -1 : 0;
+	return ret ? -1 : 0;
 }
 
 int collect_namespaces(bool for_dump)
@@ -1885,6 +1918,9 @@ int prepare_namespace_before_tasks(void)
 		goto err_img;
 
 	if (read_pid_ns_img())
+		goto err_img;
+
+	if (read_user_ns_img())
 		goto err_img;
 
 	return 0;
