@@ -10,6 +10,14 @@
 #include <string.h>
 #include <netinet/in.h>
 
+#ifndef SO_PASSPIDFD
+#define SO_PASSPIDFD 76
+#endif
+
+#ifndef SO_PASSRIGHTS
+#define SO_PASSRIGHTS 83
+#endif
+
 #include "int.h"
 #include "bitops.h"
 #include "libnetlink.h"
@@ -571,6 +579,22 @@ int restore_socket_opts(int sk, SkOptsEntry *soe)
 		pr_debug("\tset passsec for socket\n");
 		ret |= restore_opt(sk, SOL_SOCKET, SO_PASSSEC, &val);
 	}
+	if (soe->has_so_passpidfd && soe->so_passpidfd) {
+		if (!kdat.has_so_passpidfd) {
+			pr_err("SO_PASSPIDFD set but kernel does not support it\n");
+			return -1;
+		}
+		pr_debug("\tset passpidfd for socket\n");
+		ret |= restore_opt(sk, SOL_SOCKET, SO_PASSPIDFD, &val);
+	}
+	if (soe->has_so_passrights && soe->so_passrights) {
+		if (!kdat.has_so_passrights) {
+			pr_err("SO_PASSRIGHTS set but kernel does not support it\n");
+			return -1;
+		}
+		pr_debug("\tset passrights for socket\n");
+		ret |= restore_opt(sk, SOL_SOCKET, SO_PASSRIGHTS, &val);
+	}
 	if (soe->has_so_dontroute && soe->so_dontroute) {
 		pr_debug("\tset dontroute for socket\n");
 		ret |= restore_opt(sk, SOL_SOCKET, SO_DONTROUTE, &val);
@@ -696,6 +720,17 @@ int dump_socket_opts(int sk, int family, SkOptsEntry *soe)
 		ret |= dump_opt(sk, SOL_SOCKET, SO_PASSSEC, &val);
 		soe->has_so_passsec = true;
 		soe->so_passsec = val ? true : false;
+
+		if (kdat.has_so_passpidfd) {
+			ret |= dump_opt(sk, SOL_SOCKET, SO_PASSPIDFD, &val);
+			soe->has_so_passpidfd = true;
+			soe->so_passpidfd = val ? true : false;
+		}
+		if (kdat.has_so_passrights) {
+			ret |= dump_opt(sk, SOL_SOCKET, SO_PASSRIGHTS, &val);
+			soe->has_so_passrights = true;
+			soe->so_passrights = val ? true : false;
+		}
 	}
 
 	ret |= dump_opt(sk, SOL_SOCKET, SO_DONTROUTE, &val);
