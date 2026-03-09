@@ -223,6 +223,12 @@ TST_NOFILE	:=				\
 		scm06				\
 		scm09				\
 		scm_creds00			\
+		scm_creds01			\
+		scm_creds02			\
+		scm_pidfd00			\
+		scm_pidfd01			\
+		scm_pidfd02			\
+		scm_multi00			\
 		aio00				\
 		aio01				\
 		fd				\
