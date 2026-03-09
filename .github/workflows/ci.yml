@@ -53,6 +53,9 @@ jobs:
 
   archlinux-test:
     needs: [alpine-test]
+    # archlinux:latest + pacman -Syu is a rolling-release build; failures
+    # caused by upstream package churn are outside CRIU's control.
+    continue-on-error: true
     runs-on: ubuntu-22.04
     steps:
     - uses: actions/checkout@v4
