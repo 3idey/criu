@@ -23,6 +23,12 @@
 #include "protobuf.h"
 #include "images/sk-packet.pb-c.h"
 #include "pstree.h"
+#include "pidfd.h"
+#include "kerndat.h"
+
+#ifndef SCM_PIDFD
+#define SCM_PIDFD 0x04
+#endif
 
 #ifndef SO_PASSPIDFD
 #define SO_PASSPIDFD 76
@@ -155,6 +161,70 @@ static int dump_scm_credentials(struct cmsghdr *ch, SkPacketEntry *pe)
 	return 0;
 }
 
+static int dump_scm_pidfd(struct cmsghdr *ch, SkPacketEntry *pe)
+{
+	int pidfd = *(int *)CMSG_DATA(ch);
+	SkPidfdScmEntry *pse;
+	ScmEntry *scme;
+	struct stat st;
+	void *buf;
+	pid_t pid;
+	int i;
+
+	pid = parse_pidfd_pid(pidfd);
+
+	buf = xmalloc(sizeof(ScmEntry) + sizeof(SkPidfdScmEntry));
+	if (!buf) {
+		close(pidfd);
+		return -1;
+	}
+
+	scme = xptr_pull(&buf, ScmEntry);
+	scm_entry__init(scme);
+	scme->type = SCM_PIDFD;
+	pse = xptr_pull(&buf, SkPidfdScmEntry);
+	sk_pidfd_scm_entry__init(pse);
+
+	if (pid < 0) {
+		/*
+		 * parse_pidfd_pid returns -1 when the referenced
+		 * process has already exited (fdinfo shows Pid: -1).
+		 * Mark it stale; we don't need the original pid for
+		 * restore -- a temporary helper process will be used.
+		 */
+		pse->pid = 0;
+		pse->has_ino = true;
+		pse->ino = 0;
+		pse->has_stale = true;
+		pse->stale = true;
+	} else {
+		if (fstat(pidfd, &st) < 0) {
+			pr_perror("Failed to fstat pidfd %d", pidfd);
+			close(pidfd);
+			xfree(scme);
+			return -1;
+		}
+		pse->pid = pid;
+		pse->has_ino = true;
+		pse->ino = st.st_ino;
+		pse->has_stale = true;
+		pse->stale = (kill(pid, 0) == -1 && errno == ESRCH);
+	}
+
+	close(pidfd);
+	scme->pidfd = pse;
+
+	i = pe->n_scm++;
+	if (xrealloc_safe(&pe->scm, pe->n_scm * sizeof(ScmEntry *))) {
+		pe->n_scm--;
+		xfree(scme);
+		return -1;
+	}
+
+	pe->scm[i] = scme;
+	return 0;
+}
+
 /*
  * Maximum size of the control messages. XXX -- is there any
  * way to get this value out of the kernel?
@@ -198,6 +268,12 @@ static int dump_packet_cmsg(struct msghdr *mh, SkPacketEntry *pe)
 			continue;
 		}
 
+		if (ch->cmsg_type == SCM_PIDFD) {
+			if (dump_scm_pidfd(ch, pe))
+				return -1;
+			continue;
+		}
+
 		pr_err("Control messages in queue, not supported\n");
 		return -1;
 	}
@@ -222,6 +298,7 @@ int dump_sk_queue(int sock_fd, int sock_id)
 	SkPacketEntry pe = SK_PACKET_ENTRY__INIT;
 	int ret, size, orig_peek_off;
 	int orig_passcred = 0;
+	int orig_passpidfd = 0;
 	void *data;
 	socklen_t tmp;
 
@@ -282,6 +359,27 @@ int dump_sk_queue(int sock_fd, int sock_id)
 			       &one, sizeof(one))) {
 			pr_perror("Unable to set SO_PASSCRED for peek");
 			goto err_brk;
+		}
+	}
+
+	/*
+	 * Similarly, temporarily enable SO_PASSPIDFD so that the
+	 * peek loop can see SCM_PIDFD control messages.  The kernel
+	 * generates SCM_PIDFD on recvmsg only when SO_PASSPIDFD is
+	 * set on the receiving socket.
+	 */
+	if (kdat.has_so_passpidfd) {
+		tmp = sizeof(orig_passpidfd);
+		if (getsockopt(sock_fd, SOL_SOCKET, SO_PASSPIDFD,
+			       &orig_passpidfd, &tmp) == 0 &&
+		    !orig_passpidfd) {
+			int one = 1;
+
+			if (setsockopt(sock_fd, SOL_SOCKET, SO_PASSPIDFD,
+				       &one, sizeof(one))) {
+				pr_perror("Unable to set SO_PASSPIDFD for peek");
+				goto err_set_sock;
+			}
 		}
 	}
 
@@ -353,6 +451,16 @@ int dump_sk_queue(int sock_fd, int sock_id)
 	ret = 0;
 
 err_set_sock:
+	/*
+	 * Restore original SO_PASSPIDFD value.
+	 */
+	if (kdat.has_so_passpidfd && !orig_passpidfd) {
+		int zero = 0;
+
+		setsockopt(sock_fd, SOL_SOCKET, SO_PASSPIDFD,
+			   &zero, sizeof(zero));
+	}
+
 	/*
 	 * Restore original SO_PASSCRED value.
 	 */
