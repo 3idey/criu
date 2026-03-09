@@ -1400,6 +1400,30 @@ static int check_timer_cr_ids(void)
 	return 0;
 }
 
+static int check_so_passpidfd(void)
+{
+	if (!kdat.has_so_passpidfd)
+		return -1;
+
+	return 0;
+}
+
+static int check_so_peerpidfd(void)
+{
+	if (!kdat.has_so_peerpidfd)
+		return -1;
+
+	return 0;
+}
+
+static int check_so_passrights(void)
+{
+	if (!kdat.has_so_passrights)
+		return -1;
+
+	return 0;
+}
+
 /* musl doesn't have a statx wrapper... */
 struct staty {
 	__u32 stx_dev_major;
@@ -1721,6 +1745,9 @@ int cr_check(void)
 		ret |= check_overlayfs_maps();
 		ret |= check_timer_cr_ids();
 		ret |= check_pagemap_scan_guard_pages();
+		ret |= check_so_passpidfd();
+		ret |= check_so_peerpidfd();
+		ret |= check_so_passrights();
 
 		if (kdat.lsm == LSMTYPE__APPARMOR)
 			ret |= check_apparmor_stacking();
@@ -1860,6 +1887,9 @@ static struct feature_list feature_list[] = {
 	{ "overlayfs_maps", check_overlayfs_maps },
 	{ "pagemap_scan_guard_pages", check_pagemap_scan_guard_pages },
 	{ "binfmt_misc_sandboxing", check_binfmt_misc_sandboxing },
+	{ "so_passpidfd", check_so_passpidfd },
+	{ "so_peerpidfd", check_so_peerpidfd },
+	{ "so_passrights", check_so_passrights },
 	{ NULL, NULL },
 };
 
