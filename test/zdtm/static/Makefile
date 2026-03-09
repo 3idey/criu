@@ -222,6 +222,7 @@ TST_NOFILE	:=				\
 		scm05				\
 		scm06				\
 		scm09				\
+		scm_creds00			\
 		aio00				\
 		aio01				\
 		fd				\
