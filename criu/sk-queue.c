@@ -52,12 +52,11 @@ static int collect_one_packet(void *obj, ProtobufCMessage *msg, struct cr_img *i
 		return -1;
 
 	/*
-	 * See dump_packet_cmsg() -- only SCM_RIGHTS are supported and
-	 * only 1 of that kind is possible, thus not more than 1 SCMs
-	 * on a packet.
+	 * See dump_packet_cmsg() -- at most 1 SCM_RIGHTS and 1
+	 * SCM_CREDENTIALS per packet, thus not more than 2 SCMs.
 	 */
-	if (pkt->entry->n_scm > 1) {
-		pr_err("More than 1 SCM is not possible\n");
+	if (pkt->entry->n_scm > 2) {
+		pr_err("More than 2 SCMs per packet is not supported\n");
 		xfree(pkt->data);
 		return -1;
 	}
@@ -457,33 +456,76 @@ int prepare_scms(void)
 	pr_info("Preparing SCMs\n");
 	list_for_each_entry(pkt, &packets_list, list) {
 		SkPacketEntry *pe = pkt->entry;
-		ScmEntry *se;
-		struct cmsghdr *ch;
+		char *buf;
+		size_t total = 0;
+		int i;
 
 		if (!pe->n_scm)
 			continue;
 
-		se = pe->scm[0]; /* Only 1 SCM is possible */
+		/* First pass: calculate total control message buffer size */
+		for (i = 0; i < pe->n_scm; i++) {
+			ScmEntry *se = pe->scm[i];
 
-		if (se->type == SCM_RIGHTS) {
-			pkt->scm_len = CMSG_SPACE(se->n_rights * sizeof(int));
-			pkt->scm = xmalloc(pkt->scm_len);
-			if (!pkt->scm)
+			if (se->type == SCM_RIGHTS)
+				total += CMSG_SPACE(se->n_rights * sizeof(int));
+			else if (se->type == SCM_CREDENTIALS)
+				total += CMSG_SPACE(sizeof(struct ucred));
+			else {
+				pr_err("Unsupported scm %d in image\n", se->type);
 				return -1;
-
-			ch = (struct cmsghdr *)pkt->scm; /* FIXME -- via msghdr */
-			ch->cmsg_level = SOL_SOCKET;
-			ch->cmsg_type = SCM_RIGHTS;
-			ch->cmsg_len = CMSG_LEN(se->n_rights * sizeof(int));
-
-			if (unix_note_scm_rights(pe->id_for, se->rights, (int *)CMSG_DATA(ch), se->n_rights))
-				return -1;
-
-			continue;
+			}
 		}
 
-		pr_err("Unsupported scm %d in image\n", se->type);
-		return -1;
+		pkt->scm_len = total;
+		pkt->scm = xmalloc(total);
+		if (!pkt->scm)
+			return -1;
+		memset(pkt->scm, 0, total);
+
+		/* Second pass: fill control message buffer */
+		buf = (char *)pkt->scm;
+		for (i = 0; i < pe->n_scm; i++) {
+			ScmEntry *se = pe->scm[i];
+			struct cmsghdr *ch = (struct cmsghdr *)buf;
+
+			if (se->type == SCM_RIGHTS) {
+				ch->cmsg_level = SOL_SOCKET;
+				ch->cmsg_type = SCM_RIGHTS;
+				ch->cmsg_len = CMSG_LEN(se->n_rights * sizeof(int));
+
+				if (unix_note_scm_rights(pe->id_for, se->rights,
+						(int *)CMSG_DATA(ch), se->n_rights))
+					return -1;
+
+				buf += CMSG_SPACE(se->n_rights * sizeof(int));
+				continue;
+			}
+
+			if (se->type == SCM_CREDENTIALS) {
+				struct pstree_item *item;
+				struct ucred *uc;
+
+				ch->cmsg_level = SOL_SOCKET;
+				ch->cmsg_type = SCM_CREDENTIALS;
+				ch->cmsg_len = CMSG_LEN(sizeof(struct ucred));
+
+				uc = (struct ucred *)CMSG_DATA(ch);
+				uc->uid = se->cred->uid;
+				uc->gid = se->cred->gid;
+				item = pstree_item_by_virt(se->cred->pid);
+				if (!item) {
+					pr_warn("SCM_CREDENTIALS: pid %d not in pstree, using CRIU's pid\n",
+						se->cred->pid);
+					uc->pid = getpid();
+				} else {
+					uc->pid = item->pid->real;
+				}
+
+				buf += CMSG_SPACE(sizeof(struct ucred));
+				continue;
+			}
+		}
 	}
 
 	return 0;
