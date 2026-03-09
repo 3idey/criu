@@ -22,6 +22,11 @@
 #include "files.h"
 #include "protobuf.h"
 #include "images/sk-packet.pb-c.h"
+#include "pstree.h"
+
+#ifndef SO_PASSPIDFD
+#define SO_PASSPIDFD 76
+#endif
 
 #undef LOG_PREFIX
 #define LOG_PREFIX "skqueue: "
@@ -109,6 +114,40 @@ static int dump_scm_rights(struct cmsghdr *ch, SkPacketEntry *pe)
 
 	i = pe->n_scm++;
 	if (xrealloc_safe(&pe->scm, pe->n_scm * sizeof(ScmEntry *))) {
+		pe->n_scm--;
+		xfree(scme);
+		return -1;
+	}
+
+	pe->scm[i] = scme;
+	return 0;
+}
+
+static int dump_scm_credentials(struct cmsghdr *ch, SkPacketEntry *pe)
+{
+	struct ucred *ucred = (struct ucred *)CMSG_DATA(ch);
+	SkUcredEntry *uce;
+	ScmEntry *scme;
+	void *buf;
+	int i;
+
+	buf = xmalloc(sizeof(ScmEntry) + sizeof(SkUcredEntry));
+	if (!buf)
+		return -1;
+
+	scme = xptr_pull(&buf, ScmEntry);
+	scm_entry__init(scme);
+	scme->type = SCM_CREDENTIALS;
+	uce = xptr_pull(&buf, SkUcredEntry);
+	sk_ucred_entry__init(uce);
+	uce->pid = ucred->pid;
+	uce->uid = ucred->uid;
+	uce->gid = ucred->gid;
+	scme->cred = uce;
+
+	i = pe->n_scm++;
+	if (xrealloc_safe(&pe->scm, pe->n_scm * sizeof(ScmEntry *))) {
+		pe->n_scm--;
 		xfree(scme);
 		return -1;
 	}
@@ -127,6 +166,7 @@ static int dump_packet_cmsg(struct msghdr *mh, SkPacketEntry *pe)
 {
 	struct cmsghdr *ch;
 	int n_rights = 0;
+	int n_creds = 0;
 
 	for (ch = CMSG_FIRSTHDR(mh); ch; ch = CMSG_NXTHDR(mh, ch)) {
 		if (ch->cmsg_type == SCM_RIGHTS) {
@@ -143,6 +183,19 @@ static int dump_packet_cmsg(struct msghdr *mh, SkPacketEntry *pe)
 				return -1;
 
 			n_rights++;
+			continue;
+		}
+
+		if (ch->cmsg_type == SCM_CREDENTIALS) {
+			if (n_creds) {
+				pr_err("Unexpected 2nd SCM_CREDENTIALS from the kernel\n");
+				return -1;
+			}
+
+			if (dump_scm_credentials(ch, pe))
+				return -1;
+
+			n_creds++;
 			continue;
 		}
 
@@ -169,6 +222,7 @@ int dump_sk_queue(int sock_fd, int sock_id)
 {
 	SkPacketEntry pe = SK_PACKET_ENTRY__INIT;
 	int ret, size, orig_peek_off;
+	int orig_passcred = 0;
 	void *data;
 	socklen_t tmp;
 
@@ -213,6 +267,24 @@ int dump_sk_queue(int sock_fd, int sock_id)
 	}
 
 	pe.id_for = sock_id;
+
+	/*
+	 * Temporarily enable SO_PASSCRED so that the peek loop
+	 * below can see any SCM_CREDENTIALS control messages that
+	 * reside in the queue.  The kernel only delivers these
+	 * cmsgs when the receiving socket has the flag set.
+	 */
+	tmp = sizeof(orig_passcred);
+	if (getsockopt(sock_fd, SOL_SOCKET, SO_PASSCRED,
+		       &orig_passcred, &tmp) == 0 && !orig_passcred) {
+		int one = 1;
+
+		if (setsockopt(sock_fd, SOL_SOCKET, SO_PASSCRED,
+			       &one, sizeof(one))) {
+			pr_perror("Unable to set SO_PASSCRED for peek");
+			goto err_brk;
+		}
+	}
 
 	while (1) {
 		char cmsg[CMSG_MAX_SIZE];
@@ -282,6 +354,16 @@ int dump_sk_queue(int sock_fd, int sock_id)
 	ret = 0;
 
 err_set_sock:
+	/*
+	 * Restore original SO_PASSCRED value.
+	 */
+	if (!orig_passcred) {
+		int zero = 0;
+
+		setsockopt(sock_fd, SOL_SOCKET, SO_PASSCRED,
+			   &zero, sizeof(zero));
+	}
+
 	/*
 	 * Restore original peek offset.
 	 */
