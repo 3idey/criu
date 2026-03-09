@@ -6,6 +6,10 @@
 
 #include "zdtmtst.h"
 
+#ifndef SO_PASSPIDFD
+#define SO_PASSPIDFD 76
+#endif
+
 const char *test_doc = "Check various socket options to work";
 const char *test_author = "Pavel Emelyanov <xemul@parallels.com>";
 
@@ -27,6 +31,7 @@ int main(int argc, char **argv)
 		OPT(SO_DONTROUTE),
 		OPT(SO_NO_CHECK),
 		OPT(SO_OOBINLINE),
+		OPT(SO_PASSPIDFD),
 	};
 	static const int NOPTS = sizeof(vname) / sizeof(*vname);
 	#undef OPT
@@ -49,9 +54,15 @@ int main(int argc, char **argv)
 	}
 
 	for (i = 0; i < NOPTS; i++) {
-		sk = vname[i].opt == SO_PASSCRED || vname[i].opt == SO_PASSSEC ? usock : sock;
+		sk = vname[i].opt == SO_PASSCRED || vname[i].opt == SO_PASSSEC ||
+		     vname[i].opt == SO_PASSPIDFD ? usock : sock;
 		ret = getsockopt(sk, SOL_SOCKET, vname[i].opt, &val[i], &len);
 		if (ret) {
+			if (errno == ENOPROTOOPT && vname[i].opt == SO_PASSPIDFD) {
+				test_msg("SO_PASSPIDFD not supported, skipping\n");
+				val[i] = -1;
+				continue;
+			}
 			pr_perror("can't get %s", vname[i].name);
 			return 1;
 		}
@@ -85,7 +96,10 @@ int main(int argc, char **argv)
 	test_waitsig();
 
 	for (i = 0; i < NOPTS; i++) {
-		sk = vname[i].opt == SO_PASSCRED || vname[i].opt == SO_PASSSEC ? usock : sock;
+		if (val[i] == -1)
+			continue;
+		sk = vname[i].opt == SO_PASSCRED || vname[i].opt == SO_PASSSEC ||
+		     vname[i].opt == SO_PASSPIDFD ? usock : sock;
 		ret = getsockopt(sk, SOL_SOCKET, vname[i].opt, &rval, &len);
 		if (ret) {
 			pr_perror("can't verify %s", vname[i].name);
