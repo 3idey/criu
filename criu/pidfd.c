@@ -10,6 +10,7 @@
 #include <signal.h>
 #include "common/bug.h"
 #include "rst-malloc.h"
+#include "util.h"
 
 #include "compel/plugins/std/syscall-codes.h"
 
@@ -121,9 +122,9 @@ static int pidfd_open(pid_t pid, int flags)
 	return syscall(__NR_pidfd_open, pid, flags);
 }
 
-static int create_tmp_process(void)
+pid_t create_tmp_process(void)
 {
-	int tmp_process;
+	pid_t tmp_process;
 	tmp_process = fork();
 	if (tmp_process < 0) {
 		pr_perror("Could not fork");
@@ -135,7 +136,7 @@ static int create_tmp_process(void)
 	return tmp_process;
 }
 
-static int kill_helper(pid_t pid)
+int kill_helper(pid_t pid)
 {
 	int status;
 	sigset_t blockmask, oldmask;
@@ -182,6 +183,37 @@ static int kill_helper(pid_t pid)
 	return 0;
 err:
 	return -1;
+}
+
+/*
+ * parse_pidfd_pid - read the PID stored in a pidfd.
+ *
+ * Reads /proc/self/fdinfo/<fd> and returns the value on the
+ * "Pid:" line. Returns -1 on error.
+ */
+pid_t parse_pidfd_pid(int pidfd)
+{
+	char buf[256];
+	FILE *f;
+	pid_t pid = -1;
+
+	f = fopen_proc(PROC_SELF, "fdinfo/%d", pidfd);
+	if (!f) {
+		pr_perror("Cannot open fdinfo for pidfd %d", pidfd);
+		return -1;
+	}
+
+	while (fgets(buf, sizeof(buf), f)) {
+		if (sscanf(buf, "Pid:\t%d", &pid) == 1)
+			break;
+	}
+
+	fclose(f);
+
+	if (pid < 0)
+		pr_err("Could not find Pid in fdinfo for pidfd %d\n", pidfd);
+
+	return pid;
 }
 
 static int open_one_pidfd(struct file_desc *d, int *new_fd)
