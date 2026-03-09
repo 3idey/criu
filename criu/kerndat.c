@@ -1072,6 +1072,110 @@ err:
 	return exit_code;
 }
 
+#ifndef SO_PASSPIDFD
+#define SO_PASSPIDFD 76
+#endif
+
+int kerndat_so_passpidfd(void)
+{
+	int exit_code = -1;
+	socklen_t len;
+	int val, sock;
+
+	sock = socket(AF_UNIX, SOCK_DGRAM, 0);
+	if (sock < 0) {
+		pr_perror("Unable to create a socket");
+		return -1;
+	}
+
+	len = sizeof(val);
+	if (getsockopt(sock, SOL_SOCKET, SO_PASSPIDFD, &val, &len)) {
+		if (errno != ENOPROTOOPT) {
+			pr_perror("Unable to get SO_PASSPIDFD with getsockopt");
+			goto err;
+		}
+		kdat.has_so_passpidfd = false;
+	} else
+		kdat.has_so_passpidfd = true;
+
+	exit_code = 0;
+err:
+	close(sock);
+	return exit_code;
+}
+
+#ifndef SO_PEERPIDFD
+#define SO_PEERPIDFD 77
+#endif
+
+int kerndat_so_peerpidfd(void)
+{
+	int exit_code = -1;
+	socklen_t len;
+	int val, sock;
+
+	sock = socket(AF_UNIX, SOCK_DGRAM, 0);
+	if (sock < 0) {
+		pr_perror("Unable to create a socket");
+		return -1;
+	}
+
+	len = sizeof(val);
+	if (getsockopt(sock, SOL_SOCKET, SO_PEERPIDFD, &val, &len)) {
+		if (errno == ENOPROTOOPT) {
+			kdat.has_so_peerpidfd = false;
+		} else if (errno == ENODATA) {
+			/*
+			 * ENODATA means the kernel supports SO_PEERPIDFD
+			 * but the socket has no connected peer yet.
+			 */
+			kdat.has_so_peerpidfd = true;
+		} else {
+			pr_perror("Unable to get SO_PEERPIDFD with getsockopt");
+			goto err;
+		}
+	} else {
+		kdat.has_so_peerpidfd = true;
+	}
+
+	exit_code = 0;
+err:
+	close(sock);
+	return exit_code;
+}
+
+#ifndef SO_PASSRIGHTS
+#define SO_PASSRIGHTS 83
+#endif
+
+int kerndat_so_passrights(void)
+{
+	int exit_code = -1;
+	socklen_t len;
+	int val, sock;
+
+	sock = socket(AF_UNIX, SOCK_DGRAM, 0);
+	if (sock < 0) {
+		pr_perror("Unable to create a socket");
+		return -1;
+	}
+
+	len = sizeof(val);
+	if (getsockopt(sock, SOL_SOCKET, SO_PASSRIGHTS, &val, &len)) {
+		if (errno != ENOPROTOOPT) {
+			pr_perror("Unable to get SO_PASSRIGHTS with getsockopt");
+			goto err;
+		}
+		kdat.has_so_passrights = false;
+	} else
+		kdat.has_so_passrights = true;
+
+	exit_code = 0;
+err:
+	close(sock);
+	return exit_code;
+}
+
 static int kerndat_has_move_mount_set_group(void)
 {
 	char tmpdir[] = "/tmp/.criu.move_mount_set_group.XXXXXX";
@@ -2088,6 +2192,18 @@ int kerndat_init(void)
 	}
 	if (!ret && kerndat_sockopt_buf_lock()) {
 		pr_err("kerndat_sockopt_buf_lock failed when initializing kerndat.\n");
+		ret = -1;
+	}
+	if (!ret && kerndat_so_passpidfd()) {
+		pr_err("kerndat_so_passpidfd failed when initializing kerndat.\n");
+		ret = -1;
+	}
+	if (!ret && kerndat_so_peerpidfd()) {
+		pr_err("kerndat_so_peerpidfd failed when initializing kerndat.\n");
+		ret = -1;
+	}
+	if (!ret && kerndat_so_passrights()) {
+		pr_err("kerndat_so_passrights failed when initializing kerndat.\n");
 		ret = -1;
 	}
 	if (!ret && kerndat_has_openat2()) {

@@ -78,6 +78,9 @@ struct kerndat_s {
 	bool has_nspid;
 	bool has_nftables_concat;
 	bool has_sockopt_buf_lock;
+	bool has_so_passpidfd;
+	bool has_so_peerpidfd;
+	bool has_so_passrights;
 	dev_t hugetlb_dev[HUGETLB_MAX];
 	bool has_move_mount_set_group;
 	bool has_openat2;
