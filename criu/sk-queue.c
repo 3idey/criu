@@ -43,6 +43,7 @@ struct sk_packet {
 	char *data;
 	unsigned scm_len;
 	int *scm;
+	pid_t scm_helper; /* tmp process for SCM_PIDFD injection */
 };
 
 static LIST_HEAD(packets_list);
@@ -53,16 +54,17 @@ static int collect_one_packet(void *obj, ProtobufCMessage *msg, struct cr_img *i
 
 	pkt->entry = pb_msg(msg, SkPacketEntry);
 	pkt->scm = NULL;
+	pkt->scm_helper = 0;
 	pkt->data = xmalloc(pkt->entry->length);
 	if (pkt->data == NULL)
 		return -1;
 
 	/*
-	 * See dump_packet_cmsg() -- at most 1 SCM_RIGHTS and 1
-	 * SCM_CREDENTIALS per packet, thus not more than 2 SCMs.
+	 * See dump_packet_cmsg() -- at most 1 SCM_RIGHTS, 1
+	 * SCM_CREDENTIALS, and 1 SCM_PIDFD per packet.
 	 */
-	if (pkt->entry->n_scm > 2) {
-		pr_err("More than 2 SCMs per packet is not supported\n");
+	if (pkt->entry->n_scm > 3) {
+		pr_err("More than 3 SCMs per packet is not supported\n");
 		xfree(pkt->data);
 		return -1;
 	}
@@ -485,6 +487,89 @@ err_brk:
 	return ret;
 }
 
+/*
+ * Resolve virtual pids in SCM control messages to real pids.
+ * Called at sendmsg time when all processes have been forked.
+ */
+static int resolve_scm_pids(struct sk_packet *pkt)
+{
+	SkPacketEntry *pe = pkt->entry;
+	char *buf = (char *)pkt->scm;
+	bool has_creds = false;
+	int i;
+
+	for (i = 0; i < pe->n_scm; i++) {
+		if (pe->scm[i]->type == SCM_CREDENTIALS) {
+			has_creds = true;
+			break;
+		}
+	}
+
+	for (i = 0; i < pe->n_scm; i++) {
+		ScmEntry *se = pe->scm[i];
+
+		if (se->type == SCM_RIGHTS) {
+			buf += CMSG_SPACE(se->n_rights * sizeof(int));
+			continue;
+		}
+
+		if (se->type == SCM_CREDENTIALS) {
+			struct cmsghdr *ch = (struct cmsghdr *)buf;
+			struct ucred *uc = (struct ucred *)CMSG_DATA(ch);
+			struct pstree_item *item;
+
+			item = pstree_item_by_virt(se->cred->pid);
+			if (!item) {
+				pr_warn("SCM_CREDENTIALS: pid %d not in pstree, using CRIU's pid\n",
+					se->cred->pid);
+				uc->pid = getpid();
+			} else {
+				uc->pid = item->pid->real;
+			}
+
+			buf += CMSG_SPACE(sizeof(struct ucred));
+			continue;
+		}
+
+		if (se->type == SCM_PIDFD) {
+			struct cmsghdr *ch;
+			struct ucred *uc;
+
+			/*
+			 * Skipped by prepare_scms() when the packet
+			 * has explicit SCM_CREDENTIALS.
+			 */
+			if (has_creds)
+				continue;
+
+			ch = (struct cmsghdr *)buf;
+			uc = (struct ucred *)CMSG_DATA(ch);
+
+			/*
+			 * Stale pidfds use a helper process whose pid
+			 * was already placed by prepare_scms().
+			 */
+			if (!se->pidfd->stale) {
+				struct pstree_item *item;
+
+				item = pstree_item_by_virt(se->pidfd->pid);
+				if (!item) {
+					pr_warn("SCM_PIDFD: pid %d not in pstree, using CRIU's pid\n",
+						se->pidfd->pid);
+					uc->pid = getpid();
+				} else {
+					uc->pid = item->pid->real;
+				}
+			}
+
+			buf += CMSG_SPACE(sizeof(struct ucred));
+			continue;
+		}
+	}
+
+	return 0;
+}
+
 static int send_one_pkt(int fd, struct sk_packet *pkt)
 {
 	int ret;
@@ -498,6 +583,7 @@ static int send_one_pkt(int fd, struct sk_packet *pkt)
 	iov.iov_len = entry->length;
 
 	if (pkt->scm != NULL) {
+		resolve_scm_pids(pkt);
 		mh.msg_controllen = pkt->scm_len;
 		mh.msg_control = pkt->scm;
 	}
@@ -513,6 +599,12 @@ static int send_one_pkt(int fd, struct sk_packet *pkt)
 	ret = sendmsg(fd, &mh, 0);
 	xfree(pkt->data);
 	xfree(pkt->scm);
+	if (pkt->scm_helper) {
+		if (kill_helper(pkt->scm_helper))
+			pr_warn("Failed to kill SCM_PIDFD helper %d\n",
+				pkt->scm_helper);
+		pkt->scm_helper = 0;
+	}
 	if (ret < 0) {
 		pr_perror("Failed to send packet");
 		return -1;
@@ -567,9 +659,25 @@ int prepare_scms(void)
 		char *buf;
 		size_t total = 0;
 		int i;
+		bool has_creds = false;
 
 		if (!pe->n_scm)
 			continue;
+
+		/*
+		 * Check if this packet has explicit SCM_CREDENTIALS.
+		 * If so, SCM_PIDFD entries are redundant: the kernel
+		 * stores only one UNIXCB(skb).pid per skb, and the
+		 * receiver's SO_PASSPIDFD will derive SCM_PIDFD from
+		 * it.  Sending both would cause the SCM_PIDFD entry
+		 * (with uid=0) to overwrite the real credentials.
+		 */
+		for (i = 0; i < pe->n_scm; i++) {
+			if (pe->scm[i]->type == SCM_CREDENTIALS) {
+				has_creds = true;
+				break;
+			}
+		}
 
 		/* First pass: calculate total control message buffer size */
 		for (i = 0; i < pe->n_scm; i++) {
@@ -579,7 +687,15 @@ int prepare_scms(void)
 				total += CMSG_SPACE(se->n_rights * sizeof(int));
 			else if (se->type == SCM_CREDENTIALS)
 				total += CMSG_SPACE(sizeof(struct ucred));
-			else {
+			else if (se->type == SCM_PIDFD) {
+				if (has_creds)
+					continue;
+				/*
+				 * Injected as SCM_CREDENTIALS: the receiving
+				 * socket's SO_PASSPIDFD converts it to SCM_PIDFD.
+				 */
+				total += CMSG_SPACE(sizeof(struct ucred));
+			} else {
 				pr_err("Unsupported scm %d in image\n", se->type);
 				return -1;
 			}
@@ -611,7 +727,6 @@ int prepare_scms(void)
 			}
 
 			if (se->type == SCM_CREDENTIALS) {
-				struct pstree_item *item;
 				struct ucred *uc;
 
 				ch->cmsg_level = SOL_SOCKET;
@@ -621,13 +736,52 @@ int prepare_scms(void)
 				uc = (struct ucred *)CMSG_DATA(ch);
 				uc->uid = se->cred->uid;
 				uc->gid = se->cred->gid;
-				item = pstree_item_by_virt(se->cred->pid);
-				if (!item) {
-					pr_warn("SCM_CREDENTIALS: pid %d not in pstree, using CRIU's pid\n",
-						se->cred->pid);
-					uc->pid = getpid();
+				uc->pid = 0; /* resolved later by resolve_scm_pids */
+
+				buf += CMSG_SPACE(sizeof(struct ucred));
+				continue;
+			}
+
+			if (se->type == SCM_PIDFD) {
+				struct ucred *uc;
+
+				/*
+				 * If the packet already has SCM_CREDENTIALS,
+				 * skip: the kernel stores one UNIXCB per skb
+				 * and the last SCM_CREDENTIALS wins, so a
+				 * duplicate would overwrite the real uid/gid.
+				 */
+				if (has_creds)
+					continue;
+
+				/*
+				 * SCM_PIDFD cannot be injected directly
+				 * (__scm_send rejects it). Instead, inject
+				 * SCM_CREDENTIALS with the right PID; the
+				 * receiving socket's SO_PASSPIDFD will derive
+				 * SCM_PIDFD from UNIXCB(skb).pid on recv.
+				 */
+				ch->cmsg_level = SOL_SOCKET;
+				ch->cmsg_type = SCM_CREDENTIALS;
+				ch->cmsg_len = CMSG_LEN(sizeof(struct ucred));
+
+				uc = (struct ucred *)CMSG_DATA(ch);
+				uc->uid = 0;
+				uc->gid = 0;
+
+				if (se->pidfd->stale) {
+					/*
+					 * Stale pidfd: fork a helper process
+					 * whose pid is embedded in the skb;
+					 * kill it after sendmsg completes.
+					 */
+					pid_t pid = create_tmp_process();
+					if (pid < 0)
+						return -1;
+					uc->pid = pid;
+					pkt->scm_helper = pid;
 				} else {
-					uc->pid = item->pid->real;
+					uc->pid = 0; /* resolved later */
 				}
 
 				buf += CMSG_SPACE(sizeof(struct ucred));
