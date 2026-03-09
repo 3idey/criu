@@ -36,6 +36,9 @@ message sk_opts_entry {
 	optional uint32		so_linger	= 24;
 
 	optional uint32		so_buf_lock	= 25;
+
+	optional bool		so_passpidfd	= 26;
+	optional bool		so_passrights	= 27;
 }
 
 enum sk_shutdown {
