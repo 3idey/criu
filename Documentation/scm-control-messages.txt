@@ -1,0 +1,178 @@
+SCM Control Messages Support
+============================
+
+OVERVIEW
+--------
+CRIU supports checkpoint and restore of Unix domain socket control messages
+(SCMs) that are queued but not yet received at dump time. This document
+describes the supported SCM types and related socket options.
+
+SUPPORTED SCM TYPES
+-------------------
+
+SCM_RIGHTS::
+    File descriptor passing. Fully supported since early CRIU versions.
+
+SCM_CREDENTIALS::
+    Process credentials (pid, uid, gid) attached to messages. The sender's
+    credentials are preserved across checkpoint/restore. On restore, the
+    pid field is remapped to the restored process's new PID using CRIU's
+    process tree mapping.
+
+SCM_PIDFD::
+    A pidfd (process file descriptor) referencing the sender. Requires
+    kernel 6.5 or later. On restore, CRIU injects the pidfd via
+    SCM_CREDENTIALS; the receiver's SO_PASSPIDFD setting causes the
+    kernel to regenerate the pidfd on recvmsg().
+    +
+    *Stale pidfds:* If the referenced process exited between dump and
+    restore, CRIU creates a temporary helper process, embeds its pid in
+    the message, then kills the helper after injection. This produces a
+    stale pidfd on the receiver side, matching the original behavior.
+
+SOCKET OPTIONS
+--------------
+
+SO_PASSCRED::
+    Controls whether SCM_CREDENTIALS are delivered to the receiver.
+    Supported since early CRIU versions.
+
+SO_PASSPIDFD::
+    Controls whether SCM_PIDFD is delivered to the receiver. Requires
+    kernel 6.5 or later. CRIU dumps and restores this option.
+
+SO_PEERPIDFD::
+    Returns a pidfd for the connected peer via getsockopt(). This is a
+    read-only option; no image field is needed because the kernel
+    provides it automatically once the socket is reconnected on restore.
+    Requires kernel 6.5 or later.
+
+SO_PASSRIGHTS::
+    Controls file descriptor passing behavior. Requires kernel 6.14 or
+    later. CRIU dumps and restores this option.
+
+KERNEL VERSION REQUIREMENTS
+---------------------------
+
+[cols="2,1,3"]
+|===
+|Feature |Kernel |Notes
+
+|SCM_RIGHTS
+|Ancient
+|Always supported
+
+|SCM_CREDENTIALS
+|2.2+
+|Always supported
+
+|SCM_PIDFD
+|6.5+
+|Requires SO_PASSPIDFD on receiver
+
+|SO_PASSPIDFD
+|6.5+
+|Required for SCM_PIDFD
+
+|SO_PEERPIDFD
+|6.5+
+|Read-only, no restore needed
+
+|SO_PASSRIGHTS
+|6.14+
+|Optional
+|===
+
+If a dump image contains features (e.g., so_passpidfd = true) that the
+restore kernel does not support, CRIU will report an error.
+
+FEATURE DETECTION
+-----------------
+Use `criu check` to verify kernel support:
+
+----
+criu check --feature so_passpidfd
+criu check --feature so_peerpidfd
+criu check --feature so_passrights
+----
+
+IMPLEMENTATION NOTES
+--------------------
+
+Dump Process::
+    During dump, CRIU temporarily enables SO_PASSCRED and SO_PASSPIDFD
+    (if supported) on the target socket before peeking the queue with
+    MSG_PEEK. This ensures credentials and pidfds are visible in the
+    control message buffer. The original socket options are restored
+    afterward.
+
+Restore Process::
+    SCM_CREDENTIALS are restored by building a cmsg with the saved
+    uid/gid and the remapped pid. PID resolution is deferred until
+    sendmsg() time because target processes may not exist when the
+    cmsg buffer is prepared.
+    +
+    SCM_PIDFD cannot be injected directly (the kernel rejects it).
+    Instead, CRIU sends SCM_CREDENTIALS with the target pid; the
+    receiver's SO_PASSPIDFD setting causes the kernel to generate
+    SCM_PIDFD on recvmsg().
+
+Multi-SCM Messages::
+    A single message can carry up to 3 SCM entries: one SCM_RIGHTS,
+    one SCM_CREDENTIALS, and one SCM_PIDFD. CRIU handles these
+    correctly, including the case where both SCM_CREDENTIALS and
+    SCM_PIDFD are present (the redundant SCM_PIDFD is skipped during
+    restore since the SCM_CREDENTIALS already provides the pid).
+
+TESTING
+-------
+The following ZDTM tests verify SCM control message support:
+
+[cols="2,3"]
+|===
+|Test |Description
+
+|scm_creds00
+|SCM_CREDENTIALS over SOCK_DGRAM
+
+|scm_creds01
+|SCM_CREDENTIALS over SOCK_STREAM
+
+|scm_creds02
+|SCM_CREDENTIALS + SCM_RIGHTS combined
+
+|scm_creds03
+|SCM_CREDENTIALS over SOCK_SEQPACKET
+
+|scm_pidfd00
+|Live SCM_PIDFD over SOCK_DGRAM
+
+|scm_pidfd01
+|Stale SCM_PIDFD (dead process)
+
+|scm_pidfd02
+|SCM_PIDFD + SCM_RIGHTS combined
+
+|scm_pidfd03
+|Live SCM_PIDFD over SOCK_SEQPACKET
+
+|scm_multi00
+|All three SCM types in one message
+
+|sock_opts00
+|Socket option dump/restore including SO_PASSPIDFD
+|===
+
+Run individual tests with:
+
+----
+sudo ./test/zdtm.py run -t zdtm/static/scm_creds00
+----
+
+SEE ALSO
+--------
+*criu*(8), *unix*(7), *cmsg*(3), *pidfd_open*(2)
+
+AUTHOR
+------
+The CRIU team.
