@@ -67,6 +67,7 @@ TST_NOFILE	:=				\
 		pipe00				\
 		pipe01				\
 		pipe02				\
+		pipe_owner			\
 		pthread00			\
 		pthread00-pac			\
 		pthread01			\
