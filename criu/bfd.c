@@ -275,16 +275,51 @@ int bwrite(struct bfd *bfd, const void *buf, int size)
 	return __bwrite(bfd, buf, size);
 }
 
-int bwritev(struct bfd *bfd, const struct iovec *iov, int cnt)
+int bwritev(struct bfd *bfd, struct iovec *iov, int cnt)
 {
 	int i, written = 0;
 
 	if (!bfd_buffered(bfd)) {
-		/*
-		 * FIXME writev() should be called again if writev() writes
-		 * less bytes than requested.
-		 */
-		return writev(bfd->fd, iov, cnt);
+		size_t off = 0;
+
+		while (cnt) {
+			ssize_t ret;
+
+			/*
+			 * Temporarily modify the first iovec to skip already-written
+			 * bytes from previous partial writes, then restore it before
+			 * the next iteration.
+			 */
+			iov[0].iov_base += off;
+			iov[0].iov_len -= off;
+			ret = writev(bfd->fd, iov, cnt);
+			iov[0].iov_base -= off;
+			iov[0].iov_len += off;
+			if (ret < 0) {
+				pr_perror("writev failed for fd %d", bfd->fd);
+				return ret;
+			}
+			if (ret == 0) {
+				errno = EIO;
+				pr_perror("writev made no progress (fd %d)", bfd->fd);
+				return -1;
+			}
+
+			written += ret;
+			ret += off;
+			while (ret) {
+				if (iov[0].iov_len > ret) {
+					off = ret;
+					break;
+				}
+				ret -= iov[0].iov_len;
+				iov++;
+				cnt--;
+				off = 0;
+			}
+
+		}
+		return written;
 	}
 
 	for (i = 0; i < cnt; i++) {
