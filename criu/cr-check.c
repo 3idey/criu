@@ -1642,7 +1642,7 @@ int cr_check(void)
 	if (ns == NULL)
 		return -1;
 
-	mntinfo = collect_mntinfo(ns, false);
+	mntinfo_set(collect_mntinfo(ns, false));
 	if (mntinfo == NULL)
 		return -1;
 

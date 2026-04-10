@@ -122,6 +122,7 @@ struct mount_info {
 };
 
 extern struct mount_info *mntinfo;
+extern void mntinfo_set(struct mount_info *new_mntinfo);
 
 extern void mntinfo_add_list_before(struct mount_info **head, struct mount_info *new);
 
