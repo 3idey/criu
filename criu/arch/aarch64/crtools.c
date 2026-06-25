@@ -259,7 +259,7 @@ int restore_fpu(struct rt_sigframe *sigframe, CoreEntry *core)
 {
 	int i;
 	struct fpsimd_context *fpsimd = RT_SIGFRAME_FPU(sigframe);
-	struct gcs_context *gcs;
+	struct cr_gcs_context *gcs;
 
 	if (core->ti_aarch64->fpsimd->n_vregs != 64)
 		return 1;

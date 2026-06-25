@@ -51,7 +51,7 @@ static bool __compel_gcs_enabled(struct cr_user_gcs *gcs)
 int sigreturn_prep_regs_plain(struct rt_sigframe *sigframe, user_regs_struct_t *regs, user_fpregs_struct_t *fpregs)
 {
 	struct fpsimd_context *fpsimd = RT_SIGFRAME_FPU(sigframe);
-	struct gcs_context *gcs = RT_SIGFRAME_GCS(sigframe);
+	struct cr_gcs_context *gcs = RT_SIGFRAME_GCS(sigframe);
 
 	memcpy(sigframe->uc.uc_mcontext.regs, regs->regs, sizeof(regs->regs));
 

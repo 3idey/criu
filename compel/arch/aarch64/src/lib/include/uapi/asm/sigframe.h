@@ -14,7 +14,7 @@
 
 typedef struct fpsimd_context fpu_state_t;
 
-struct gcs_context {
+struct cr_gcs_context {
 	struct _aarch64_ctx head;
 	__u64 gcspr;
 	__u64 features_enabled;
@@ -23,7 +23,7 @@ struct gcs_context {
 
 struct aux_context {
 	struct fpsimd_context fpsimd;
-	struct gcs_context gcs;
+	struct cr_gcs_context gcs;
 	/* additional context to be added before "end" */
 	struct _aarch64_ctx end;
 };
