@@ -57,6 +57,7 @@
 #include "mount-v2.h"
 #include "util-caps.h"
 #include "pagemap_scan.h"
+#include "pidfd.h"
 
 struct kerndat_s kdat = {};
 volatile int dummy_var;
@@ -1100,6 +1101,28 @@ static int kerndat_has_so_passpidfd(void)
 err:
 	close(sock);
 	return exit_code;
+}
+
+static int kerndat_has_pidfd_get_info(void)
+{
+	int pidfd, exit_code, ret;
+
+	pidfd = syscall(SYS_pidfd_open, getpid(), 0);
+	if (pidfd < 0) {
+		/* Without pidfd_open() there is certainly no PIDFD_GET_INFO. */
+		kdat.has_pidfd_get_info = false;
+		return 0;
+	}
+
+	/*
+	 * On our own live pid pidfd_query_exit() returns 0 when the ioctl
+	 * works (the task is alive) and -1 when it is unavailable.
+	 */
+	ret = pidfd_query_exit(pidfd, &exit_code);
+	close(pidfd);
+
+	kdat.has_pidfd_get_info = (ret >= 0);
+	return 0;
 }
 
 static int kerndat_has_move_mount_set_group(void)
@@ -2222,6 +2245,10 @@ int kerndat_init(void)
 	}
 	if (!ret && kerndat_has_so_passpidfd()) {
 		pr_err("kerndat_has_so_passpidfd failed when initializing kerndat.\n");
+		ret = -1;
+	}
+	if (!ret && kerndat_has_pidfd_get_info()) {
+		pr_err("kerndat_has_pidfd_get_info failed when initializing kerndat.\n");
 		ret = -1;
 	}
 	if (!ret && kerndat_has_openat2()) {
