@@ -6,16 +6,19 @@
 #include "pidfd.pb-c.h"
 #include "protobuf.h"
 #include "pstree.h"
+#include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <sys/prctl.h>
 #include <signal.h>
 #include "common/bug.h"
 #include "common/compiler.h"
 #include "rst-malloc.h"
+#include "util.h"
 
 #include "compel/plugins/std/syscall-codes.h"
 
@@ -35,7 +38,7 @@ struct pidfd_info {
 };
 
 struct dead_pidfd {
-	unsigned int ino;
+	uint64_t ino;
 	int creator_id;
 
 	struct hlist_node hash;
@@ -51,7 +54,7 @@ void init_dead_pidfd_hash(void)
 		INIT_HLIST_HEAD(&dead_pidfd_hash[i]);
 }
 
-static struct dead_pidfd *lookup_dead_pidfd(unsigned int ino)
+static struct dead_pidfd *lookup_dead_pidfd(uint64_t ino)
 {
 	struct dead_pidfd *dead;
 	struct hlist_head *chain;
@@ -90,6 +93,29 @@ int pidfd_query_exit(int pidfd, int *exit_code)
 	return 1;
 }
 
+/*
+ * Read the pidfs inode number of the struct pid @pidfd refers to. This is the
+ * identity of the process: pidfs hands every struct pid a unique inode (Linux
+ * 6.9), and comparing inode numbers is how the kernel itself tells two pidfds
+ * apart.
+ *
+ * Returns 0 and fills *ino on success, -1 on failure. Note that this is not
+ * the convention pidfd_query_exit() above uses -- that one has a third answer
+ * to give ("the task is still alive"), this one does not.
+ */
+int pidfd_query_ino(int pidfd, uint64_t *ino)
+{
+	struct stat st;
+
+	if (fstat(pidfd, &st) < 0) {
+		pr_debug("fstat on pidfd %d failed: %s\n", pidfd, strerror(errno));
+		return -1;
+	}
+
+	*ino = st.st_ino;
+	return 0;
+}
+
 int is_pidfd_link(char *link)
 {
 	/*
@@ -101,7 +127,7 @@ int is_pidfd_link(char *link)
 
 static void pr_info_pidfd(char *action, PidfdEntry *pidfe)
 {
-	pr_info("%s: id %#08x flags %u NSpid %d ino %u\n",
+	pr_info("%s: id %#08x flags %u NSpid %d ino %" PRIu64 "\n",
 		action, pidfe->id, pidfe->flags, pidfe->nspid, pidfe->ino
 	);
 }
@@ -174,6 +200,10 @@ static int create_tmp_process(void)
 		pr_perror("Could not fork");
 		return -1;
 	} else if (tmp_process == 0) {
+		/* Nothing would reap us if criu died before kill_helper(). */
+		prctl(PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0);
+		/* We need none of the task's files, see create_status_helper(). */
+		close_fds(3);
 		while(1)
 			sleep(1);
 	}
@@ -182,69 +212,101 @@ static int create_tmp_process(void)
 
 /*
  * A restore-time stand-in for a process that was already dead at dump time.
- * @wfd is the write end of the pipe a status helper blocks on; it is -1 when
- * the original exit status is unknown and a plain SIGKILL is the best we can
- * reproduce.
+ * Without @has_status the original exit status is unknown and a plain SIGKILL
+ * is the best we can reproduce.
  */
 struct dead_pid {
 	struct dead_pid *next;
+	struct hlist_node hash;
+	uint64_t ino;
+	bool has_ino;
 	pid_t pid;
-	int wfd;
 	bool has_status;
 	int status;
 };
 
 /*
- * Fork a helper that blocks until we tell it how to die, then reproduces an
+ * Stand-ins live only for as long as one task is restoring its files, and are
+ * forked by that task, so this table needs no initializer: a static hlist head
+ * is a NULL pointer, which is an empty chain.
+ */
+#define DEAD_PID_HASH_SIZE 32
+static struct hlist_head dead_pid_hash[DEAD_PID_HASH_SIZE];
+static struct dead_pid *dead_pid_list;
+
+static struct dead_pid *lookup_dead_pid(uint64_t ino)
+{
+	struct dead_pid *dp;
+
+	hlist_for_each_entry(dp, &dead_pid_hash[ino % DEAD_PID_HASH_SIZE], hash) {
+		if (dp->ino == ino)
+			return dp;
+	}
+
+	return NULL;
+}
+
+/*
+ * The signal a status helper waits for. Any signal would do: it is blocked
+ * from the moment the helper is forked (criu restore runs with signals
+ * blocked), so it can never be lost or act early, and the helper consumes it
+ * with sigwait() rather than letting it have any effect of its own. That also
+ * leaves it free to die *by* this signal, if that is how the process it
+ * stands in for died.
+ */
+#define DEAD_PID_GO SIGUSR1
+
+/*
+ * Fork a helper that waits until we tell it to die, then reproduces an
  * arbitrary wait(2) status: it exits with a given code or raises a given
  * signal. This is how a stand-in for a dead pid gets the exit status the
- * process it stands in for had. *wfd is the write end of a pipe; write a
- * wait-status word to it (see kill_status_helper()) to make the child die.
+ * process it stands in for had. Tell it to die with kill_status_helper().
+ *
+ * @status is passed by nothing more than the fork: the child gets its own
+ * copy along with the rest of our memory. Deliberately so -- a helper must
+ * hold no file descriptor of ours, since it outlives the open method that
+ * forked it and any fd it kept would sit in the way of a file this task has
+ * still to restore.
  */
-static int create_status_helper(struct dead_pid_pool *pool, int *wfd)
+static int create_status_helper(int status)
 {
-	int pipefd[2];
 	pid_t pid;
-
-	if (pipe(pipefd) < 0) {
-		pr_perror("Could not create pipe for status helper");
-		return -1;
-	}
 
 	pid = fork();
 	if (pid < 0) {
 		pr_perror("Could not fork status helper");
-		close(pipefd[0]);
-		close(pipefd[1]);
 		return -1;
 	}
 
 	if (pid == 0) {
-		struct dead_pid *dp;
-		int status = 0;
-		ssize_t n;
+		sigset_t set;
+		int sig;
 
-		close(pipefd[1]);
 		/*
-		 * Drop the write ends of the helpers forked before us, so that
-		 * each one only ever sees EOF from its own pipe. Otherwise a
-		 * criu that dies before kill_status_helper() would leave them
-		 * all blocked on a read that can never complete.
+		 * Nothing would reap us if criu died before it got around to
+		 * kill_status_helper().
 		 */
-		for (dp = pool->list; dp; dp = dp->next) {
-			if (dp->wfd >= 0)
-				close(dp->wfd);
-		}
+		prctl(PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0);
+		/*
+		 * fork() handed us a copy of every file the task has restored
+		 * so far, and we outlive the open method that forked us. Drop
+		 * them, or we would pin the other end of a pipe or a socket
+		 * well past the point the task meant to close it.
+		 */
+		close_fds(3);
 
-		n = read(pipefd[0], &status, sizeof(status));
-		if (n != sizeof(status))
+		sigemptyset(&set);
+		sigaddset(&set, DEAD_PID_GO);
+		sigprocmask(SIG_BLOCK, &set, NULL);
+		if (sigwait(&set, &sig) != 0)
 			_exit(1);
 
 		if (WIFEXITED(status)) {
 			_exit(WEXITSTATUS(status));
 		} else if (WIFSIGNALED(status)) {
-			int sig = WTERMSIG(status);
 			sigset_t unblock;
+
+			sig = WTERMSIG(status);
 
 			/*
 			 * We are forked from a criu process that runs with
@@ -272,8 +334,6 @@ static int create_status_helper(struct dead_pid_pool *pool, int *wfd)
 		_exit(1);
 	}
 
-	close(pipefd[0]);
-	*wfd = pipefd[1];
 	return pid;
 }
 
@@ -339,7 +399,7 @@ err:
  * Make a create_status_helper() child die with @status (a wait(2)-style
  * status word) and reap it, verifying it died exactly as asked.
  */
-static int kill_status_helper(pid_t pid, int wfd, int status)
+static int kill_status_helper(pid_t pid, int status)
 {
 	sigset_t oldmask;
 	int wstatus;
@@ -350,7 +410,7 @@ static int kill_status_helper(pid_t pid, int wfd, int status)
 		goto out;
 	blocked = true;
 
-	if (write(wfd, &status, sizeof(status)) != sizeof(status)) {
+	if (kill(pid, DEAD_PID_GO) < 0) {
 		pr_perror("Could not signal status helper %d to exit", pid);
 		goto out;
 	}
@@ -375,11 +435,10 @@ static int kill_status_helper(pid_t pid, int wfd, int status)
 
 	ret = 0;
 out:
-	close(wfd);
 	/*
-	 * On the error paths the child may still be running -- blocked on the
-	 * pipe we just closed, or never signalled at all. Kill and reap it so
-	 * we neither leak a zombie nor leave SIGCHLD blocked in the caller.
+	 * On the error paths the child may still be running -- never signalled
+	 * at all, or signalled but not reaped. Kill and reap it so we neither
+	 * leak a zombie nor leave SIGCHLD blocked in the caller.
 	 */
 	if (!reaped && pid > 0) {
 		kill(pid, SIGKILL);
@@ -393,27 +452,31 @@ out:
 }
 
 /*
- * Return the pid of a stand-in process for a dead struct pid with the given
- * pidfs attributes; fork one if @pool has none matching yet. @attr may be
- * NULL, or carry no exit code, when the way the process died is not known.
+ * Return the pid of a stand-in process for the dead struct pid with pidfs
+ * inode @ino, forking one if this is the first reference to it. @has_ino is
+ * false when the dump could not record an identity, in which case the caller
+ * gets a stand-in all of its own rather than one shared by guesswork. @attr
+ * may be NULL, or carry no exit code, when the way the process died is not
+ * known.
  */
-pid_t dead_pid_get(struct dead_pid_pool *pool, PidfsAttrEntry *attr)
+pid_t dead_pid_get(uint64_t ino, bool has_ino, PidfsAttrEntry *attr)
 {
 	bool has_status = attr && attr->has_exit_code;
 	int status = has_status ? attr->exit_code : 0;
 	struct dead_pid *dp;
-	int wfd = -1;
 	pid_t pid;
 
-	for (dp = pool->list; dp; dp = dp->next) {
-		if (dp->has_status != has_status)
-			continue;
-		if (!has_status || dp->status == status)
+	if (has_ino) {
+		dp = lookup_dead_pid(ino);
+		if (dp) {
+			pr_debug("Reusing stand-in %d for dead pid ino %" PRIu64 "\n",
+				 dp->pid, ino);
 			return dp->pid;
+		}
 	}
 
 	if (has_status)
-		pid = create_status_helper(pool, &wfd);
+		pid = create_status_helper(status);
 	else
 		pid = create_tmp_process();
 	if (pid < 0)
@@ -421,50 +484,53 @@ pid_t dead_pid_get(struct dead_pid_pool *pool, PidfsAttrEntry *attr)
 
 	dp = xmalloc(sizeof(*dp));
 	if (!dp) {
-		/*
-		 * Kill before closing: a status helper is blocked reading the
-		 * pipe, so closing it first would race the SIGKILL with the
-		 * child exiting on its own.
-		 */
 		kill_helper(pid);
-		if (wfd >= 0)
-			close(wfd);
 		return -1;
 	}
 
 	dp->pid = pid;
-	dp->wfd = wfd;
 	dp->has_status = has_status;
 	dp->status = status;
-	dp->next = pool->list;
-	pool->list = dp;
+	dp->ino = ino;
+	dp->has_ino = has_ino;
+	dp->next = dead_pid_list;
+	dead_pid_list = dp;
+
+	INIT_HLIST_NODE(&dp->hash);
+	if (has_ino) {
+		hlist_add_head(&dp->hash, &dead_pid_hash[ino % DEAD_PID_HASH_SIZE]);
+		pr_debug("Forked stand-in %d for dead pid ino %" PRIu64 "\n", pid, ino);
+	} else {
+		pr_debug("Forked stand-in %d for a dead pid of unknown identity\n", pid);
+	}
 
 	return pid;
 }
 
 /*
- * Make every stand-in in @pool die the way the process it stands in for did,
- * and reap it. Call this only once everything that needs to reference these
- * dead pids has done so: each reference -- an open pidfd, an skb holding the
- * struct pid -- keeps the pid around, so it goes stale exactly as it was
- * before the dump.
+ * Make every stand-in die the way the process it stands in for did, and reap
+ * it. Call this only once everything that needs to reference these dead pids
+ * has done so: each reference -- an open pidfd, an skb holding the struct pid
+ * -- keeps the pid around, so it goes stale exactly as it was before the dump.
  */
-int dead_pid_put_all(struct dead_pid_pool *pool)
+int dead_pid_put_all(void)
 {
 	struct dead_pid *dp, *next;
 	int ret = 0;
 
-	for (dp = pool->list; dp; dp = next) {
+	for (dp = dead_pid_list; dp; dp = next) {
 		next = dp->next;
 		if (dp->has_status) {
-			if (kill_status_helper(dp->pid, dp->wfd, dp->status))
+			if (kill_status_helper(dp->pid, dp->status))
 				ret = -1;
 		} else if (kill_helper(dp->pid)) {
 			ret = -1;
 		}
+		if (dp->has_ino)
+			hlist_del(&dp->hash);
 		xfree(dp);
 	}
-	pool->list = NULL;
+	dead_pid_list = NULL;
 
 	return ret;
 }
@@ -473,7 +539,6 @@ static int open_one_pidfd(struct file_desc *d, int *new_fd)
 {
 	struct pidfd_info *info, *child;
 	struct dead_pidfd *dead = NULL;
-	struct dead_pid_pool pool = {};
 	pid_t pid;
 	int pidfd = -1;
 
@@ -502,14 +567,19 @@ static int open_one_pidfd(struct file_desc *d, int *new_fd)
 
 	/*
 	 * Nothing of the original process is left but its struct pid, so stand
-	 * in for it with a process that dies the way the original did once
-	 * every pidfd referring to it has been opened.
+	 * in for it with a process that dies the way the original did.
 	 *
-	 * All the pidfds handled here refer to that one struct pid, so the pool
-	 * only ever holds a single stand-in. It is a pool because sk-queue.c
-	 * restores many dead pids at once and shares the same helpers for it.
+	 * The stand-in is keyed on the pidfs ino, so anything else in this task
+	 * that refers to the same dead process -- another pidfd, a queued
+	 * packet it sent -- lands on this very same one. It is killed in
+	 * open_fdinfos(), once all of them have taken their reference.
+	 *
+	 * A zero ino is not an identity: the ino: line of /proc/pid/fdinfo/N is
+	 * not required to be there, and taking its absence for a shared
+	 * identity would collapse every dead pidfd onto one stand-in. Ask for a
+	 * private one instead.
 	 */
-	pid = dead_pid_get(&pool, info->pidfe->attr);
+	pid = dead_pid_get(info->pidfe->ino, info->pidfe->ino != 0, info->pidfe->attr);
 	if (pid < 0)
 		goto err_close;
 
@@ -537,8 +607,6 @@ static int open_one_pidfd(struct file_desc *d, int *new_fd)
 		pr_perror("Could not open pidfd for %d", info->pidfe->nspid);
 		goto err_close;
 	}
-	if (dead_pid_put_all(&pool))
-		goto err_close;
 out:
 	if (rst_file_params(pidfd, info->pidfe->fown, info->pidfe->flags)) {
 		goto err_close;
@@ -549,7 +617,6 @@ out:
 err_close:
 	if (pidfd >= 0)
 		close(pidfd);
-	dead_pid_put_all(&pool);
 	pr_err("Can't create pidfd %#08x NSpid: %d flags: %u\n",
 	   info->pidfe->id, info->pidfe->nspid, info->pidfe->flags);
 	return -1;

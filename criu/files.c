@@ -1264,6 +1264,17 @@ splice:
 	list_splice(&fake, list);
 	list_splice(&completed, list);
 
+	/*
+	 * Everything this task could reference a dead process from has been
+	 * restored, so the stand-in processes we forked for them (see
+	 * dead_pid_get()) have served their purpose. Make them die the way the
+	 * processes they stand in for did; the references left behind -- pidfd
+	 * files, packets sitting in a socket queue -- go stale exactly as they
+	 * were before the dump.
+	 */
+	if (dead_pid_put_all() && !ret)
+		ret = -1;
+
 	return ret;
 }
 

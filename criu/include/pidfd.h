@@ -49,27 +49,41 @@ struct criu_pidfd_info {
  * stand-in die exactly the way the original did. The references then go stale
  * with the right exit status, just as they were before the dump.
  *
- * Stand-ins are shared within a pool by exit status. Through the pidfd itself
- * that makes two dead pids that died the same way indistinguishable, which is
- * what they already were. What does tell them apart is the pid number, still
- * visible as ucred.pid on a socket that also has SO_PASSCRED -- but that is a
- * dump host pid with no meaning after restore, and it is not preserved either
- * way, so sharing costs nothing that was not already lost.
+ * Stand-ins are keyed on the pidfs ino of the struct pid they stand in for,
+ * in one hashtable shared by everything that restores a reference to a dead
+ * pid -- pidfd files and the queued packets of dead senders alike. That is
+ * what makes the identities come out right: two references to one dead
+ * process get one stand-in, and two dead processes get two, however alike
+ * they happen to look. Nothing else about a reaped process is distinctive
+ * enough to key on; two of them can share an exit code, a name, everything.
+ *
+ * An entry with no ino recorded (see pidfs_attr_entry) gets a stand-in of its
+ * own, shared with nothing, since there is no way to tell what it is.
+ *
+ * The table is global to one restoring task, not to the restore, because a
+ * stand-in is a child of the task that forked it. For pidfd files that is
+ * enough: collect_one_pidfd() elects a single creator per dead struct pid and
+ * open_one_pidfd() sends the fds it opens to the other tasks, so they all
+ * come from one place. Queued packets have no such mechanism, so two tasks
+ * restoring sockets that hold packets from one dead sender -- or one holding
+ * the packets and another holding a pidfd of the same sender -- still end up
+ * with a stand-in each, and a receiver sees two inos where there was one.
+ * Fixing that means routing dead senders through a creator task the way
+ * pidfds already are.
+ *
+ * dead_pid_put_all() makes every stand-in die and reaps it. It has to run
+ * once all the references are taken, so it is called from open_fdinfos() once
+ * the task has restored all of its files, not by the individual open methods.
  */
-struct dead_pid;
-
-struct dead_pid_pool {
-	struct dead_pid *list;
-};
-
-extern pid_t dead_pid_get(struct dead_pid_pool *pool, PidfsAttrEntry *attr);
-extern int dead_pid_put_all(struct dead_pid_pool *pool);
+extern pid_t dead_pid_get(uint64_t ino, bool has_ino, PidfsAttrEntry *attr);
+extern int dead_pid_put_all(void);
 
 extern const struct fdtype_ops pidfd_dump_ops;
 extern struct collect_image_info pidfd_cinfo;
 extern int is_pidfd_link(char *link);
 extern void init_dead_pidfd_hash(void);
 extern int pidfd_query_exit(int pidfd, int *exit_code);
+extern int pidfd_query_ino(int pidfd, uint64_t *ino);
 struct pidfd_dump_info {
 	PidfdEntry pidfe;
 	pid_t pid;

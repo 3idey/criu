@@ -7,7 +7,15 @@ import "pidfs.proto";
 
 message pidfd_entry {
 	required uint32		id		= 1;
-	required uint32		ino		= 2;
+	/*
+	 * The pidfs inode number of the struct pid this pidfd refers to.
+	 * Since Linux 6.9 pidfs gives every struct pid a unique inode, which
+	 * is the only reliable way to tell two of them apart: pid numbers get
+	 * reused, and the pidfs attributes of a reaped task (an exit code,
+	 * say) are not distinctive at all. Restore keys its stand-in
+	 * processes on this, see dead_pid_get().
+	 */
+	required uint64		ino		= 2;
 	required uint32		flags		= 3;
 	required int32		nspid		= 4;
 	required fown_entry	fown		= 5;

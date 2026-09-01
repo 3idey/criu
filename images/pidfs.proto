@@ -25,4 +25,15 @@ message pidfs_attr_entry {
 	// kernel tracks as PIDFS_ATTR_BIT_EXIT; absent means the task is known
 	// to be dead but the way it died is not.
 	optional sint32		exit_code	= 1;
+	// The pidfs inode number, which identifies this struct pid. Restore uses
+	// it to give everything that referred to one process on dump a single
+	// stand-in process, and everything that referred to different processes
+	// distinct ones.
+	//
+	// Only set where this message is the sole carrier of the identity: a
+	// pidfd_entry has an ino field of its own. It is optional because the ino
+	// is not always there to read -- a queued packet from a reaped sender
+	// yields no pidfd to stat on kernels < 6.17 -- and an entry without one
+	// gets a stand-in of its own, shared with nothing.
+	optional uint64		ino		= 2;
 }
